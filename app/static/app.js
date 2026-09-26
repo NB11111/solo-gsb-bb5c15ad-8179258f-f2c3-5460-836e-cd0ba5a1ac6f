@@ -13,6 +13,10 @@ const state = {
   drift: null,    // /api/drift 返回结果
   stays: null,    // /api/stays 返回结果
   simplify: null, // /api/simplify 返回结果
+  otherTrackId: null,  // 对方轨迹（/api/upload 复用同一上传接口）
+  otherName: null,
+  otherSegments: [],
+  encounters: null,    // /api/encounters 返回结果
   transform: null,
 };
 
@@ -29,7 +33,7 @@ function computeTransform() {
     return;
   }
   let minLat = 90, maxLat = -90, minLon = 180, maxLon = -180;
-  for (const seg of state.segments) {
+  for (const seg of state.segments.concat(state.otherSegments)) {
     for (const p of seg) {
       if (p.lat < minLat) minLat = p.lat;
       if (p.lat > maxLat) maxLat = p.lat;
@@ -116,6 +120,9 @@ function draw() {
     }
   }
 
+  // 对方轨迹（粉）
+  for (const seg of state.otherSegments) drawPolyline(seg, "#d81b60", 2.5 * dpr);
+
   // 遮蔽圆
   const t = state.transform;
   for (const c of state.circles) {
@@ -151,6 +158,16 @@ function draw() {
   if (state.stays) {
     for (const s of state.stays.stays) drawMarker(s, "#8e24aa", "停", dpr);
   }
+
+  // 相遇（红色"遇"，位置取相遇时段中点在主轨迹上的插值位置）
+  if (state.encounters) {
+    for (const e of state.encounters) {
+      const midMs =
+        (new Date(e.start_time).getTime() + new Date(e.end_time).getTime()) / 2;
+      const p = pointOnTrackAt(state.segments, midMs);
+      if (p) drawMarker(p, "#c62828", "遇", dpr);
+    }
+  }
 }
 
 function drawMarker(p, color, label, dpr) {
@@ -165,6 +182,28 @@ function drawMarker(p, color, label, dpr) {
   ctx.textBaseline = "middle";
   ctx.fillText(label, x, y);
   ctx.textBaseline = "alphabetic";
+}
+
+/* 求 t(epoch ms) 时刻轨迹上的线性插值位置：只在同一 trkseg 的相邻点之间插值，
+   相邻采样间隔超过 10 分钟视为断档（不插值）；找不到返回 null */
+function pointOnTrackAt(segments, t) {
+  const GAP_MS = 10 * 60 * 1000;
+  for (const seg of segments) {
+    for (let i = 0; i + 1 < seg.length; i++) {
+      const a = seg[i], b = seg[i + 1];
+      const ta = new Date(a.time).getTime();
+      const tb = new Date(b.time).getTime();
+      if (tb <= ta || tb - ta > GAP_MS) continue;
+      if (t >= ta && t <= tb) {
+        const u = (t - ta) / (tb - ta);
+        return {
+          lat: a.lat + (b.lat - a.lat) * u,
+          lon: a.lon + (b.lon - a.lon) * u,
+        };
+      }
+    }
+  }
+  return null;
 }
 
 /* ---------- 后端交互 ---------- */
@@ -208,8 +247,10 @@ async function uploadFile(file) {
   state.drift = null;
   state.stays = null;
   state.simplify = null;
+  state.encounters = null;
   document.getElementById("download-fixed").disabled = true;
   document.getElementById("download-simplified").disabled = true;
+  renderEncounters(null);
   computeTransform();
   renderTrackInfo(data.stats);
   renderCircleList();
@@ -219,6 +260,7 @@ async function uploadFile(file) {
   await refreshDrift();
   await refreshStays();
   await refreshSimplify();
+  if (state.otherTrackId) await refreshEncounters();
 }
 
 let paceTimer = null;
@@ -403,6 +445,47 @@ async function downloadSimplifiedGpx() {
   } catch (err) {
     showMessage(err.message);
   }
+}
+
+/* ---------- 双人轨迹相遇分析 ---------- */
+
+async function uploadOtherFile(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch("/api/upload", { method: "POST", body: fd });
+  const data = await res.json();
+  if (!res.ok) throw new Error(errDetail(data, "上传失败"));
+  state.otherTrackId = data.track_id;
+  state.otherName = data.name;
+  state.otherSegments = data.segments;
+  renderOtherTrackInfo(data);
+  computeTransform();
+  draw();
+  if (state.trackId) await refreshEncounters();
+}
+
+async function refreshEncounters() {
+  if (!state.trackId || !state.otherTrackId) return;
+  const el = document.getElementById("encounter");
+  try {
+    const res = await fetch("/api/encounters", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        track_id: state.trackId,
+        other_track_id: state.otherTrackId,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(errDetail(data, "相遇分析失败"));
+    state.encounters = data;
+    renderEncounters(data);
+  } catch (err) {
+    state.encounters = null;
+    el.classList.remove("muted");
+    el.innerHTML = `<div class="pace-error">无法进行相遇分析：${escapeHtml(err.message)}</div>`;
+  }
+  draw();
 }
 
 function saveBlob(blob, filename) {
@@ -683,6 +766,58 @@ function renderSimplify(data) {
   document.getElementById("download-simplified").disabled = false;
 }
 
+function renderOtherTrackInfo(data) {
+  const el = document.getElementById("other-track-info");
+  el.classList.remove("muted");
+  const s = data.stats;
+  const t0 = s.start_time ? new Date(s.start_time).toLocaleString() : "-";
+  const t1 = s.end_time ? new Date(s.end_time).toLocaleString() : "-";
+  el.innerHTML =
+    `<div>对方轨迹：<b>${escapeHtml(data.name)}</b></div>` +
+    `<div>轨迹点：<b>${s.points}</b> 个，原始分段：<b>${s.segments}</b> 个</div>` +
+    `<div>总距离：<b>${fmtKm(s.distance_m)} km</b></div>` +
+    `<div>时间：${t0}<br>至　${t1}</div>`;
+}
+
+function fmtTimeFull(iso) {
+  return new Date(iso).toLocaleString("zh-CN", { hour12: false });
+}
+
+function renderEncounters(data) {
+  const el = document.getElementById("encounter");
+  if (!data) {
+    el.className = "info muted";
+    el.innerHTML = state.otherTrackId
+      ? "上传主轨迹后自动分析"
+      : "上传对方轨迹后自动分析";
+    return;
+  }
+  el.classList.remove("muted");
+  const th = data.thresholds;
+  let html =
+    `<div>相遇口径：距离 ≤ <b>${Math.round(th.distance_m)} 米</b>、` +
+    `持续 ≥ <b>${Math.round(th.min_duration_s)} 秒</b>、` +
+    `采样间隔 &gt; <b>${Math.round(th.max_sample_gap_s / 60)} 分钟</b>视为断档</div>` +
+    `<div>识别到相遇：<b>${data.encounter_count}</b> 次</div>`;
+  if (data.encounters.length) {
+    const rows = data.encounters.map((e, i) =>
+      "<tr>" +
+      `<td>${i + 1}</td>` +
+      `<td>${fmtTimeFull(e.start_time)}<br>~ ${fmtTimeFull(e.end_time)}</td>` +
+      `<td>${fmtDuration(e.duration_s)}</td>` +
+      `<td>${e.min_distance_m.toFixed(1)}</td>` +
+      "</tr>"
+    ).join("");
+    html +=
+      '<table class="pace-table encounter-table"><thead><tr>' +
+      "<th>序</th><th>起止时间</th><th>时长</th><th>最近距离(m)</th>" +
+      `</tr></thead><tbody>${rows}</tbody></table>`;
+  } else {
+    html += '<div class="encounter-empty">两条轨迹在时间重叠期间无符合条件的相遇（空结果）</div>';
+  }
+  el.innerHTML = html;
+}
+
 function renderCircleList() {
   const ul = document.getElementById("circle-list");
   ul.innerHTML = "";
@@ -748,6 +883,11 @@ function resizeCanvas() {
 document.getElementById("file").addEventListener("change", (e) => {
   const file = e.target.files && e.target.files[0];
   if (file) uploadFile(file).catch((err) => showMessage(err.message));
+});
+
+document.getElementById("other-file").addEventListener("change", (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (file) uploadOtherFile(file).catch((err) => showMessage(err.message));
 });
 
 canvas.addEventListener("click", (e) => {

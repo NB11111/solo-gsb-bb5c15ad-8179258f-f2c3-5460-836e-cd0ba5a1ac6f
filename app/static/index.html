@@ -40,6 +40,8 @@
         <span><i class="sw drift"></i>漂移跳点</span>
         <span><i class="sw stay"></i>停留点</span>
         <span><i class="sw simplify"></i>精简轨迹</span>
+        <span><i class="sw other"></i>对方轨迹</span>
+        <span><i class="sw meet"></i>相遇</span>
       </div>
     </section>
   </main>
@@ -90,6 +92,17 @@
       每段首尾点始终保留，选中点的经纬度、海拔、时间原样保留，各段独立精简、不跨段连线。
       精简结果以青绿色叠加在预览图上，下载的 GPX 与预览一致；遮蔽、配速、海拔、漂移与停留统计
       仍使用上传的原始轨迹，不受精简影响</p>
+  </section>
+
+  <section class="encounter">
+    <h2>9. 双人轨迹相遇分析</h2>
+    <input type="file" id="other-file" accept=".gpx,application/gpx+xml">
+    <div id="other-track-info" class="info muted">可再上传一条含时间的 GPX（复用同一上传接口），自动分析两人相遇</div>
+    <div id="encounter" class="info muted">上传对方轨迹后自动分析</div>
+    <p class="hint">按两条轨迹各自 trkseg 的相邻点构造带时间线段（时间须严格递增，相邻采样间隔
+      &gt; 10 分钟视为断档）；仅比较时间重叠的线段，按时间线性插值位置，在局部米制平面求两人
+      距离 ≤ 50 米的连续区间；相接区间合并，持续不足 60 秒的不列出。相遇不跨断档或 trkseg 虚构；
+      对方轨迹以粉色叠加在预览图上，相遇位置以红色"遇"标记</p>
   </section>
 
   <div id="message" hidden></div>

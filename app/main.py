@@ -1,4 +1,4 @@
-"""FastAPI 入口：上传 GPX、遮蔽计算、导出、分段配速、海拔分析、漂移修复、停留识别、轨迹精简、静态页面。"""
+"""FastAPI 入口：上传 GPX、遮蔽计算、导出、分段配速、海拔分析、漂移修复、停留识别、轨迹精简、双人轨迹相遇分析、静态页面。"""
 from __future__ import annotations
 
 import uuid
@@ -12,6 +12,12 @@ from pydantic import BaseModel, Field
 
 from .drift import MAX_SPEED_MPS, MIN_OFFSET_M, fix_drift
 from .elevation import RESAMPLE_STEP_M, REVERSAL_THRESHOLD_M, elevation_profile
+from .encounter import (
+    MAX_SAMPLE_GAP_S,
+    MEET_DISTANCE_M,
+    MIN_MEET_S,
+    analyze_encounters,
+)
 from .geo import MaskCircle, haversine_m, mask_track
 from .gpxutil import build_gpx, parse_gpx
 from .pace import DEFAULT_SPLIT_KM, MAX_SPLIT_KM, MIN_SPLIT_KM, pace_splits
@@ -67,6 +73,11 @@ class SimplifyRequest(BaseModel):
     tolerance_m: float = Field(
         default=DEFAULT_TOLERANCE_M, ge=MIN_TOLERANCE_M, le=MAX_TOLERANCE_M
     )
+
+
+class EncounterRequest(BaseModel):
+    track_id: str
+    other_track_id: str
 
 
 def _point_dict(p):
@@ -353,6 +364,37 @@ def simplify_export(req: SimplifyRequest):
         media_type="application/gpx+xml",
         headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
     )
+
+
+def _encounter_dict(e):
+    return {
+        "start_time": e.start_time.isoformat(),
+        "end_time": e.end_time.isoformat(),
+        "duration_s": e.duration_s,
+        "min_distance_m": e.min_distance_m,
+    }
+
+
+@app.post("/api/encounters")
+def encounters(req: EncounterRequest):
+    """双人轨迹相遇分析：在两条含时间轨迹的时间重叠期内找相距 ≤ 50 米、持续 ≥ 60 秒的区间。"""
+    track_a = _get_track(req.track_id)
+    track_b = _get_track(req.other_track_id)
+    try:
+        result = analyze_encounters(track_a["segments"], track_b["segments"])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "encounters": [_encounter_dict(e) for e in result.encounters],
+        "encounter_count": len(result.encounters),
+        "track_a_name": track_a["name"],
+        "track_b_name": track_b["name"],
+        "thresholds": {
+            "distance_m": MEET_DISTANCE_M,
+            "min_duration_s": MIN_MEET_S,
+            "max_sample_gap_s": MAX_SAMPLE_GAP_S,
+        },
+    }
 
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")

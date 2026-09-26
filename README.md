@@ -3,8 +3,10 @@
 上传含时间的 GPX 轨迹，自动统计**分段配速**、**海拔剖面 / 累计爬升**、**停留识别**
 （停留 / 移动时长）并检测**单点漂移跳点**（可下载修复后的 GPX）；支持按 1～100 米
 误差阈值做 **Douglas-Peucker 轨迹精简**（预览叠加精简线、显示前后点数、可下载精简后的
-GPX）；在**无底图**预览图上点击敏感地点（如家、公司）并设定遮蔽半径，系统按
-**轨迹线段与遮蔽圆的交点**精确裁切，导出为**互不连接的 GPX `trkseg`** 后再分享。
+GPX）；还可再上传一条**对方轨迹**做**双人轨迹相遇分析**（时间重叠期间相距 ≤ 50 米、
+持续 ≥ 60 秒的连续区间，列出起止时间、时长与最近距离）；在**无底图**预览图上点击敏感
+地点（如家、公司）并设定遮蔽半径，系统按**轨迹线段与遮蔽圆的交点**精确裁切，导出为
+**互不连接的 GPX `trkseg`** 后再分享。
 
 - 后端：Python / FastAPI（几何裁切与配速统计在服务端完成）
 - 前端：原生 JavaScript + Canvas（无任何框架、无地图底图依赖）
@@ -32,6 +34,7 @@ docker compose up --build
 | 每段里程 | 页面"分段配速"输入框，或 `/api/pace` 的 `split_km` | 0.1～10 公里，默认 1 公里 |
 | 精简误差阈值 | 页面"轨迹精简"输入框，或 `/api/simplify` 的 `tolerance_m` | 1～100 米，默认 10 米 |
 | 停留判定口径 | `app/stay.py` 中 `STAY_RADIUS_M` / `MIN_STAY_S` / `MAX_GAP_S` | 30 米 / 3 分钟 / 10 分钟（记录中断阈值） |
+| 相遇判定口径 | `app/encounter.py` 中 `MEET_DISTANCE_M` / `MIN_MEET_S` / `MAX_SAMPLE_GAP_S` | 50 米 / 60 秒 / 10 分钟（采样断档阈值） |
 | 数据存储 | 内存 | 演示用途：轨迹仅存内存，容器重启即清空，无需数据库 |
 
 无其他必需配置（不需要 API Key、不依赖外部服务）。
@@ -53,11 +56,16 @@ docker compose up --build
    Douglas-Peucker 精简，精简线以青绿色叠加在预览图上，并显示**精简前 / 后点数**与距离；
    点击"下载精简后的 GPX"得到与预览一致的精简轨迹。遮蔽裁切、配速、海拔、漂移与停留统计
    始终使用**原始轨迹**，不受精简影响。
-7. **设置遮蔽**：在右侧预览图上**点击**敏感地点即添加遮蔽圆，半径在左侧面板设定
+7. **双人轨迹相遇分析**（可选）：在页面底部"双人轨迹相遇分析"区块**再上传一条含时间的
+   GPX**（与主轨迹复用同一 `POST /api/upload` 接口），系统自动调用 `POST /api/encounters`
+   分析两人相遇：列出每次相遇的**起止时间、时长与最近距离**，无相遇时显示空结果；
+   对方轨迹以粉色叠加在预览图上，相遇位置以红色"遇"标记。重新上传主轨迹或对方轨迹都会
+   自动重算，其余分析均不受影响。
+8. **设置遮蔽**：在右侧预览图上**点击**敏感地点即添加遮蔽圆，半径在左侧面板设定
    （添加前设定新圆半径；已有圆可在列表中单独修改或删除）。
-8. **查看裁切结果**：页面实时显示 **隐藏段数**、**裁切前距离**、**裁切后距离** 与可见分段数；
+9. **查看裁切结果**：页面实时显示 **隐藏段数**、**裁切前距离**、**裁切后距离** 与可见分段数；
    蓝色为可见轨迹，红色虚线为被隐藏段。
-9. **下载**：点击"下载遮蔽后的 GPX"，得到一条 `trk` 下多个互不连接的 `trkseg`。
+10. **下载**：点击"下载遮蔽后的 GPX"，得到一条 `trk` 下多个互不连接的 `trkseg`。
 
 ## 分段配速规则（实现要点）
 
@@ -138,6 +146,32 @@ docker compose up --build
 - **预览与下载一致**：页面叠加的精简线与下载的 GPX 使用同一接口、同一算法与参数，
   结果逐点一致；误差阈值超出 1～100 米时接口返回 422（页面输入自动收敛到范围内）。
 
+## 双人轨迹相遇分析规则（实现要点）
+
+- **基于两条已上传的原始轨迹**：对方轨迹与主轨迹复用同一个 `POST /api/upload` 接口上传，
+  各得到一个 `track_id`；相遇分析只读两条轨迹的原始 `trkseg`，不修改任何已有分析结果，
+  与遮蔽裁切、配速、海拔、漂移、停留、精简互不影响。
+- **带时间线段**：按两条轨迹各自 `trkseg` 的相邻点构造带时间线段，线段内位置按时间
+  **线性插值**；同一 `trkseg` 内相邻点时间必须**严格递增**，遇零时差或倒序接口返回 400
+  并提示"第 N 条轨迹的第 i 个 trkseg 中第 j→j+1 个轨迹点的时间未递增"。
+- **采样断档**：相邻点采样间隔**超过 10 分钟**视为记录断档，断档两侧**不构造线段**；
+  比较因此既不会跨过断档，也不会跨过 `trkseg` 边界（不虚构相遇）。间隔恰好 10 分钟不断档。
+- **仅比较时间重叠的线段**：只对两条轨迹时间区间有正长度重叠的成对线段做比较；
+  两条轨迹投影到**同一个局部等距圆柱米制平面**（以两轨迹首点中点为原点，与
+  `geo.py` / `simplify.py` 口径一致），线段在平面内对时间是线性的，重叠时段内两人的
+  相对位置为匀速直线 `d(τ) = d0 + v·τ`，`|d(τ)|² ≤ 50²` 是关于 τ 的二次不等式，
+  **解析求解**进出 50 米圆的时刻（相切单点不构成区间）。
+- **相接区间合并**：不同线段对解出的子区间按时间排序，端点相接（含浮点容差）的连续区间
+  合并为一次相遇；由于原始子区间只存在于双方都有有效线段覆盖的时间范围内，相接合并
+  不会跨过任何一方的断档或 `trkseg` 空档。
+- **最短时长过滤**：合并后的相遇区间**持续不足 60 秒的不列出**（恰好 60 秒列出）；
+  页面无相遇时显示"空结果"。
+- **输出口径**：每次相遇给出 `start_time` / `end_time`（ISO 时间）、`duration_s`（时长，
+  秒）与 `min_distance_m`（该区间内两人最近距离，取相对匀速直线在钳制极值点处的平面距离）；
+  结果按开始时间先后排列。
+- **无时间重叠 / 单点段**：两条轨迹时间完全不重叠，或只有单点 `trkseg`（无相邻点、
+  构造不出线段）时返回空相遇列表，不报错。
+
 ## 裁切规则（实现要点）
 
 - **穿越识别**：对每个原始采样线段与每个遮蔽圆求解析交点（局部切平面投影中解二次方程），
@@ -154,16 +188,17 @@ docker compose up --build
 
 ```
 app/
-  main.py          # FastAPI 路由：/api/upload、/api/mask、/api/export、/api/pace、/api/elevation、/api/drift、/api/drift/export、/api/stays、/api/simplify、/api/simplify/export、静态页面
+  main.py          # FastAPI 路由：/api/upload、/api/mask、/api/export、/api/pace、/api/elevation、/api/drift、/api/drift/export、/api/stays、/api/simplify、/api/simplify/export、/api/encounters、静态页面
   geo.py           # 几何核心：haversine、点到线段距离、线段-圆求交、按可见性裁切
   pace.py          # 分段配速：按固定里程切段、边界时间插值
   elevation.py     # 海拔剖面：20 米重采样、三点中位数、5 米反向确认峰谷、累计爬升/下降
   drift.py         # 单点漂移：跳点判定（速度 + 偏移阈值）、逐轮删除最早命中点
   stay.py          # 停留识别：锚点扩展（30 米 / 3 分钟）、记录中断（10 分钟）、记录/停留/移动时长
   simplify.py      # 轨迹精简：局部米制投影、迭代式 Douglas-Peucker（点到有限线段距离）
+  encounter.py     # 双人轨迹相遇：带时间线段、时间重叠线段对、二次不等式求 50 米区间、相接合并、60 秒过滤
   gpxutil.py       # GPX 1.1 解析（强制要求 time）与多 trkseg 导出
   static/          # 原生 JS 前端（index.html / app.js / style.css）
-tests/             # 单元测试：test_geo.py（裁切 9 项）、test_pace.py（配速 8 项）、test_elevation.py（海拔 13 项）、test_drift.py（漂移 12 项）、test_stay.py（停留 14 项）、test_simplify.py（精简 17 项）
+tests/             # 单元测试：test_geo.py（裁切 9 项）、test_pace.py（配速 8 项）、test_elevation.py（海拔 13 项）、test_drift.py（漂移 12 项）、test_stay.py（停留 14 项）、test_simplify.py（精简 17 项）、test_encounter.py（相遇 17 项）
 examples/sample.gpx# 示例轨迹（两个 trkseg，含时间与海拔）
 Dockerfile         # python:3.12-slim，构建期安装依赖，启动即运行
 docker-compose.yml # 单服务，映射 8000 端口
@@ -183,6 +218,7 @@ python3 tests/test_elevation.py  # 海拔剖面与累计爬升
 python3 tests/test_drift.py      # 单点漂移检测与修复
 python3 tests/test_stay.py       # 停留识别与记录/移动时长
 python3 tests/test_simplify.py   # 轨迹精简（Douglas-Peucker）
+python3 tests/test_encounter.py  # 双人轨迹相遇分析
 # 或：python3 -m pytest tests/
 ```
 
@@ -200,6 +236,7 @@ python3 tests/test_simplify.py   # 轨迹精简（Douglas-Peucker）
 | `POST` | `/api/stays` | `{track_id}` → 停留识别结果与记录/停留/移动时长（见下） |
 | `POST` | `/api/simplify` | `{track_id, tolerance_m?}` → 精简后分段、前后点数与距离（见下） |
 | `POST` | `/api/simplify/export` | 同上参数，返回精简后的 GPX 文件下载 |
+| `POST` | `/api/encounters` | `{track_id, other_track_id}` → 双人轨迹相遇列表（起止时间、时长、最近距离，见下） |
 
 ### `POST /api/pace` 分段配速
 
@@ -299,4 +336,33 @@ curl -X POST http://localhost:8000/api/stays \
 curl -X POST http://localhost:8000/api/simplify \
   -H "Content-Type: application/json" \
   -d '{"track_id": "<上传返回的 track_id>", "tolerance_m": 20}'
+```
+
+### `POST /api/encounters` 双人轨迹相遇分析
+
+- **参数**：`track_id`（必填，主轨迹上传返回值）；`other_track_id`（必填，对方轨迹上传
+  返回值——对方轨迹同样通过 `POST /api/upload` 上传，两条轨迹相互独立、不分主次顺序）。
+- **返回**：`encounters`（相遇列表，按开始时间先后；每次相遇含 `start_time` /
+  `end_time`（ISO 时间）、`duration_s`（时长，秒，≥ 60）、`min_distance_m`（区间内两人
+  最近距离，≤ 50））、`encounter_count`（相遇次数）、`track_a_name` / `track_b_name`
+  （两条轨迹名称）与 `thresholds`（判定口径：`distance_m=50`、`min_duration_s=60`、
+  `max_sample_gap_s=600`）。无相遇时 `encounters` 为空列表、`encounter_count=0`。
+- **算法**：按各自 `trkseg` 相邻点构造带时间线段（位置按时间线性插值），采样间隔
+  > 10 分钟处不构造线段（断档）；仅比较时间有正长度重叠的线段对，两条轨迹投影到同一
+  局部米制平面后把 `|d(τ)|² ≤ 50²` 作为二次不等式解析求解；相接区间合并，不足 60 秒
+  丢弃；不跨断档或 `trkseg` 虚构相遇。
+- **错误**：任一条轨迹相邻点时间未递增（零时差或倒序）时返回 `400` 与中文提示（指明
+  第几条轨迹、第几个 `trkseg` 与第几对点）；任一 `track_id` 不存在返回 `404`。
+
+示例（先分别上传两条 GPX，再分析；页面上第二步上传会自动完成该流程）：
+
+```bash
+# 上传主轨迹
+curl -F "file=@path/to/me.gpx" http://localhost:8000/api/upload
+# 上传对方轨迹（同一上传接口）
+curl -F "file=@path/to/friend.gpx" http://localhost:8000/api/upload
+# 分析相遇
+curl -X POST http://localhost:8000/api/encounters \
+  -H "Content-Type: application/json" \
+  -d '{"track_id": "<me 的 track_id>", "other_track_id": "<friend 的 track_id>"}'
 ```
