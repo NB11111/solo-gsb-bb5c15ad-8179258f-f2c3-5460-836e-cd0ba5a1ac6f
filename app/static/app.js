@@ -13,6 +13,9 @@ const state = {
   drift: null,    // /api/drift 返回结果
   stays: null,    // /api/stays 返回结果
   simplify: null, // /api/simplify 返回结果
+  otherTrackId: null, // 对比轨迹（第二条上传的 GPX）
+  otherName: null,
+  encounters: null, // /api/encounters 返回结果
   transform: null,
 };
 
@@ -151,6 +154,11 @@ function draw() {
   if (state.stays) {
     for (const s of state.stays.stays) drawMarker(s, "#8e24aa", "停", dpr);
   }
+
+  // 相遇点（粉红）
+  if (state.encounters) {
+    for (const e of state.encounters.encounters) drawMarker(e, "#d81b60", "遇", dpr);
+  }
 }
 
 function drawMarker(p, color, label, dpr) {
@@ -208,6 +216,7 @@ async function uploadFile(file) {
   state.drift = null;
   state.stays = null;
   state.simplify = null;
+  state.encounters = null;
   document.getElementById("download-fixed").disabled = true;
   document.getElementById("download-simplified").disabled = true;
   computeTransform();
@@ -219,6 +228,7 @@ async function uploadFile(file) {
   await refreshDrift();
   await refreshStays();
   await refreshSimplify();
+  await refreshEncounters();
 }
 
 let paceTimer = null;
@@ -403,6 +413,52 @@ async function downloadSimplifiedGpx() {
   } catch (err) {
     showMessage(err.message);
   }
+}
+
+/* ---------- 双人轨迹相遇 ---------- */
+
+async function uploadOtherFile(file) {
+  const fd = new FormData();
+  fd.append("file", file);
+  const res = await fetch("/api/upload", { method: "POST", body: fd });
+  const data = await res.json();
+  if (!res.ok) throw new Error(errDetail(data, "对比轨迹上传失败"));
+  state.otherTrackId = data.track_id;
+  state.otherName = data.name;
+  renderTrack2Info(data.stats);
+  await refreshEncounters();
+}
+
+async function refreshEncounters() {
+  const el = document.getElementById("encounter");
+  if (!state.trackId || !state.otherTrackId) {
+    state.encounters = null;
+    el.classList.add("muted");
+    el.textContent = state.otherTrackId
+      ? "请先上传当前轨迹"
+      : "上传对比轨迹后自动分析相遇";
+    draw();
+    return;
+  }
+  try {
+    const res = await fetch("/api/encounters", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        track_id: state.trackId,
+        other_track_id: state.otherTrackId,
+      }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(errDetail(data, "相遇分析失败"));
+    state.encounters = data;
+    renderEncounters(data);
+  } catch (err) {
+    state.encounters = null;
+    el.classList.remove("muted");
+    el.innerHTML = `<div class="pace-error">无法分析双人轨迹相遇：${escapeHtml(err.message)}</div>`;
+  }
+  draw();
 }
 
 function saveBlob(blob, filename) {
@@ -683,6 +739,43 @@ function renderSimplify(data) {
   document.getElementById("download-simplified").disabled = false;
 }
 
+function renderTrack2Info(s) {
+  const el = document.getElementById("track2-info");
+  el.classList.remove("muted");
+  const t0 = s.start_time ? new Date(s.start_time).toLocaleString() : "-";
+  const t1 = s.end_time ? new Date(s.end_time).toLocaleString() : "-";
+  el.innerHTML =
+    `<div>对比轨迹：<b>${escapeHtml(state.otherName)}</b></div>` +
+    `<div>轨迹点：<b>${s.points}</b> 个，原始分段：<b>${s.segments}</b> 个</div>` +
+    `<div>总距离：<b>${fmtKm(s.distance_m)} km</b></div>` +
+    `<div>时间：${t0}<br>至　${t1}</div>`;
+}
+
+function renderEncounters(data) {
+  const el = document.getElementById("encounter");
+  el.classList.remove("muted");
+  if (!data.encounters.length) {
+    el.innerHTML =
+      "<div>未发现相遇：两条轨迹在时间重叠范围内没有持续 ≥ 60 秒、" +
+      "距离 ≤ 50 米的区间</div>";
+    return;
+  }
+  const rows = data.encounters.map((e, i) =>
+    "<tr>" +
+    `<td>${i + 1}</td>` +
+    `<td>${fmtTime(e.start_time)} ~ ${fmtTime(e.end_time)}</td>` +
+    `<td>${fmtDuration(e.duration_s)}</td>` +
+    `<td>${e.min_distance_m.toFixed(1)}</td>` +
+    "</tr>"
+  ).join("");
+  el.innerHTML =
+    `<div>相遇次数：<b>${data.encounters.length}</b> 次` +
+    `（距离 ≤ 50 米且持续 ≥ 60 秒）</div>` +
+    '<table class="pace-table encounter-table"><thead><tr>' +
+    "<th>序</th><th>起止时间</th><th>持续时长</th><th>最近距离(m)</th>" +
+    `</tr></thead><tbody>${rows}</tbody></table>`;
+}
+
 function renderCircleList() {
   const ul = document.getElementById("circle-list");
   ul.innerHTML = "";
@@ -748,6 +841,11 @@ function resizeCanvas() {
 document.getElementById("file").addEventListener("change", (e) => {
   const file = e.target.files && e.target.files[0];
   if (file) uploadFile(file).catch((err) => showMessage(err.message));
+});
+
+document.getElementById("file2").addEventListener("change", (e) => {
+  const file = e.target.files && e.target.files[0];
+  if (file) uploadOtherFile(file).catch((err) => showMessage(err.message));
 });
 
 canvas.addEventListener("click", (e) => {
